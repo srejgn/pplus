@@ -1,0 +1,266 @@
+*
+*   Computes proportion correct for a set of items. Can have items worth more than one point.
+*   Scale  : Name for the set of items
+*   InDir  : Directory where the input data resides
+*   Infile : File with the data
+*   OutDir : Directory where to store the results
+*   OutFile: Name of output file (no spaces allowed)
+*   Cvars  : Classification variable(s)
+*   ItemSet: Variable name for the items (these need to be already scored)
+*   wgt    : the sampling weight
+*   jkz    : the jk zone variables (has value 1 to nrwgt)
+*   jkr    : the jk rep variable (has values 0 or 1)
+*   jk2type: whether to use both replicates (FULL) or only one (HALF) for the variance estimation 
+*   nrwgt  : the number of replicate weights to create (when jk2type=FULL->JKzones*2; otherwise use JKzones*1)
+*   maxpts : the maximum number of points on each of the items (if none are specified, 1 is assumed) 
+*.
+
+define !pplus (scale   = !charend('/') !default("") /
+               indir   = !charend('/') !default("") /
+               infile  = !charend('/') !default("") /
+               outdir  = !charend('/') !default("") /
+               outfile = !charend('/') !default("") /
+               cvars   = !charend('/') !default("") /
+               selvar  = !charend('/') !default("") /
+               selcrit = !charend('/') !default("") /
+               wgt     = !charend('/') !default("totwgt") /
+               nrwgt   = !charend('/') !default("150")    /
+               jkz     = !charend('/') !default("jkzone") /
+               jkr     = !charend('/') !default("jkrep")  /
+               jk2type = !charend('/') !default("FULL")   /
+               itemset = !charend('/') !default("")       /
+               maxpts  = !charend('/') !default("")       /
+               viewcod = !charend('/') !default("N")      /
+               clean   = !charend('/') !default("Y")      ) .
+
+preserve.
+
+* If viewcode is selected.
+!if (!upcase(!viewcod)=Y) !then
+set mprint=on  printback=on.
+!else
+set mprint=off printback=off.
+!ifend
+
+set tvars = name ovars = name.
+
+dataset close all.
+output close all.
+output new name = !unquote(!outfile).
+
+set length=None.
+set width=255.
+set format f8.2.
+set olang=English.
+
+!if (!upcase(!jk2type) = HALF) !then
+!let !varfac = 1
+!ifend
+
+!if (!upcase(!jk2type) = FULL) !then
+!let !varfac = 0.5
+!ifend
+
+* Count classification variables.
+!let !q = !null
+!do !i !in(!concat(!cvar,!blank(1),!head(!almvars)))
+!let !q = !concat(!q,"q")
+!doend
+!let !ncvar = !length(!q)
+
+* Rearrange the variable list front to back.
+!let !cvar1 = !null
+!do !i !in(!cvars)
+!let !cvar1 = !concat(!i,!blank(1),!cvar1)
+!doend
+!let !cvar1 = !concat(!cvar1,!blank(1),k)
+
+!let !vitm = !null.
+!let !mx = !maxpts.
+
+* get the file with the item responses and keep only cases with valid responses.
+get file = !quote(!concat(!unquote(!indir),"/",!infile,".sav"))
+  / keep = !cvars !wgt !jkz !jkr !itemset !selvar.
+compute k = 1.
+select if (nvalid(!do !itm !in(!itemset) !itm , !doend k) > 1).
+
+!if (!selcrit !ne !null) !then
+select if (!selcrit).
+!ifend
+
+!let !ni = !null
+!let !nv = !null
+
+* create the v items.
+!do !itm !in(!itemset)
+!let !ms = !head(!mx)
+!if (!ms = !null) !then !let !ms = 1 !ifend
+!do !s = 1 !to !ms
+recode !itm (!s thru !ms = 1) (sysmis = sysmis) (else = 0) into !concat(!itm,"_",!s).
+if (!itm > !ms) !concat(!itm,"_",!s) = 999.
+!let !vitm = !concat(!vitm,!blank(1),!itm,"_",!s)
+!let !nv = !concat(!nv,x)
+!doend
+!let !mx = !tail(!mx)
+!let !ni = !concat(!ni,x)
+!doend
+
+sort cases by k !cvars.
+save outfile = !quote(!concat(!unquote(!outdir),"/",!outfile,"_tmp.sav")).
+
+echo "Check min and max for the items".
+title "Original Item Responses".
+desc var = !itemset.
+
+title "Recoded Item Responses".
+desc var = !vitm.
+
+* loop over the items.
+!do !itm !in(!vitm).
+
+echo !quote(!concat("Processing Item : ",!itm)).
+
+get file = !quote(!concat(!unquote(!outdir),"/",!outfile,"_tmp.sav"))
+  / keep = k !cvars !wgt !jkz !jkr !itm.
+
+select if (not(missing(!itm))).
+
+compute !concat(!itm,"_0") = !itm * !wgt.
+
+vector !concat(!itm,"_")(!nrwgt).
+vector rwgt(!nrwgt).
+
+loop #r = 1 to !nrwgt.
+!if (!upcase(!jk2type) = FULL) !then
+do if (!jkz <> trunc((#r+1)/2)).
+compute rwgt(#r) = !wgt * 1.
+else.
+compute rwgt(#r) = !wgt * (2 * mod(!jkr + #r,2)).
+end if.
+!ifend
+!if (!upcase(!jk2type) = HALF) !then
+do if (!jkz <> #r).
+compute  rwgt(#r) = !wgt * 1.
+else.
+compute rwgt(#r) = !wgt * (2 * mod(!jkr,2)).
+end if.
+!ifend
+
+* The replicate weighted DVAR is computed here.
+compute !concat(!itm,"_")(#r) = !itm * rwgt(#r).
+
+end loop.
+
+aggregate outfile = *
+  / presorted / break  = k !cvars
+  / n = n(k)
+  / !concat(!itm,"_0") !wgt
+    !concat(!itm,"_1") to !concat(!itm,"_",!nrwgt)
+    rwgt1 to !concat(rwgt,!nrwgt) = 
+ sum(!concat(!itm,"_0") !wgt
+    !concat(!itm,"_1") to !concat(!itm,"_",!nrwgt)
+    rwgt1 to !concat(rwgt,!nrwgt)).
+
+string Item (a16).
+compute Item = !quote(!upcase(!itm)).
+if (!wgt > 0.0) pplus = !concat(!itm,"_0") / !wgt.
+vector rpplus(!nrwgt).
+vector itm = !concat(!itm,"_1") to !concat(!itm,"_",!nrwgt).
+vector rwgt = rwgt1 to !concat(rwgt,!nrwgt).
+loop #r = 1 to !nrwgt.
+if (rwgt(#r) > 0.0) rpplus(#r) = itm(#r) / rwgt(#r).
+end loop.
+
+save outfile = !quote(!concat(!unquote(!outdir),"\",!itm))
+ / keep = k !cvars Item n pplus rpplus1 to !concat(rpplus,!nrwgt).
+
+!doend.
+
+new file.
+
+get file = !quote(!concat(!unquote(!outdir),"\",!head(!vitm))).
+
+!do !itm !in (!tail(!vitm))
+add files
+  / file = *
+  / file = !quote(!concat(!unquote(!outdir),"\",!itm)).
+!doend
+execute.
+
+compute pplus_var = 0.
+vector rpplus = rpplus1 to !concat(rpplus,!nrwgt).
+loop #r = 1 to !nrwgt.
+compute pplus_var = pplus_var + (pplus - rpplus(#r))**2.
+end loop.
+
+compute pplus_var = pplus_var * !varfac.
+compute pplus_se = sqrt(pplus_var).
+
+save outfile = !quote(!concat(!unquote(!outdir),"\",!outfile,"_dtl.sav")).
+save translate
+  / outfile= !quote(!concat(!unquote(!outdir),"\",!outfile,"_dtl.csv"))
+  / replace  / type = csv / fieldnames / cells = labels.
+
+aggregate outfile = *
+ / break k !cvars
+ / pplus rpplus1 to !concat(rpplus,!nrwgt) = mean(pplus rpplus1 to !concat(rpplus,!nrwgt))
+ / TotalPoints = n(item).
+
+compute pplus_var = 0.
+vector rpplus = rpplus1 to !concat(rpplus,!nrwgt).
+loop #r = 1 to !nrwgt.
+compute pplus_var = pplus_var + (pplus - rpplus(#r))**2.
+end loop.
+
+compute pplus_var = pplus_var * !varfac.
+compute pplus_se = sqrt(pplus_var).
+
+aggregate outfile = !quote(!concat(!unquote(!outdir),"\tblmn"))
+   / break k !tail(!cvars)
+   / pplus     = mean(pplus)
+   / pplus_var = sum(pplus_var)
+   / pplus_n   = n(pplus_var).
+
+compute TotalItems = !length(!ni).
+compute MaxPoints  = !length(!nv).
+
+add files
+ / file = *
+ / file = !quote(!concat(!unquote(!outdir),"\tblmn")) / in=TblMn.
+
+if (TblMn = 1 and pplus_n > 0.0) pplus_se = sqrt(pplus_var / pplus_n**2).
+
+* numeric pplus pplus_se (f8.5).
+
+string scale (a32).
+compute scale = !quote(!scale).
+
+save outfile = !quote(!concat(!unquote(!outdir),"\",!outfile,"_ttl.sav")) 
+ / keep = !cvars pplus pplus_se scale TotalPoints TotalItems MaxPoints TblMn.
+
+get file = !quote(!concat(!unquote(!outdir),"\",!outfile,"_ttl.sav")).
+
+save translate
+  / outfile= !quote(!concat(!unquote(!outdir),"\",!outfile,"_ttl.csv"))
+  / replace  / type = csv / fieldnames / cells = labels.
+
+execute.
+
+title "Summary Statistics";
+list var = all.
+
+!if (!upcase(!clean) = Y) !then
+new file.
+!do !itm !in(!vitm)
+erase file = !quote(!concat(!unquote(!outdir),"\",!itm)).
+!doend
+erase file = !quote(!concat(!unquote(!outdir),"\tblmn")).
+erase file = !quote(!concat(!unquote(!outdir),"/",!outfile,"_tmp.sav")).
+!ifend
+
+output save 
+  outfile= !quote(!concat(!unquote(!outdir),"\",!unquote(!outfile),"_Output.spv"))
+  lock = no.
+restore.
+
+!enddefine.
